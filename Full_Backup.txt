@@ -1,0 +1,58 @@
+
+USE master;
+GO
+
+DECLARE @DBName SYSNAME;
+DECLARE @BackupPath NVARCHAR(4000);
+DECLARE @BackupDirectory NVARCHAR(4000) = N'F:\SQL_Backups';
+DECLARE @Timestamp VARCHAR(20);
+DECLARE @SQL NVARCHAR(MAX);
+
+SET @Timestamp =
+    CONVERT(VARCHAR(8), GETDATE(), 112) + '_' +
+    REPLACE(CONVERT(VARCHAR(8), GETDATE(), 108), ':', '');
+
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state_desc = 'ONLINE'
+  AND source_database_id IS NULL;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DBName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @BackupPath =
+        @BackupDirectory + N'\' +
+        @DBName + N'_FULL_' +
+        @Timestamp + N'.bak';
+
+    SET @SQL = N'
+    BACKUP DATABASE ' + QUOTENAME(@DBName) + N'
+    TO DISK = @File
+    WITH INIT,
+         COMPRESSION,
+         CHECKSUM,
+         STATS = 10;';
+
+    BEGIN TRY
+        EXEC sys.sp_executesql
+            @SQL,
+            N'@File NVARCHAR(4000)',
+            @File = @BackupPath;
+
+        PRINT 'SUCCESS: Full backup - ' + @DBName;
+    END TRY
+    BEGIN CATCH
+        PRINT 'FAILED: Full backup - ' + @DBName
+            + ' - ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @DBName;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;

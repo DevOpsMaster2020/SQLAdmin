@@ -1,0 +1,52 @@
+
+USE master;
+GO
+
+SET NOCOUNT ON;
+
+DECLARE
+    @DBName SYSNAME,
+    @SQL NVARCHAR(MAX);
+
+CREATE TABLE #Databases
+(
+    ID INT IDENTITY(1,1) PRIMARY KEY,
+    DatabaseName SYSNAME
+);
+
+INSERT INTO #Databases (DatabaseName)
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state_desc = 'ONLINE'
+  AND is_read_only = 0
+  AND source_database_id IS NULL;
+
+DECLARE @ID INT = 1;
+DECLARE @MaxID INT =
+    (SELECT MAX(ID) FROM #Databases);
+
+WHILE @ID <= ISNULL(@MaxID, 0)
+BEGIN
+    SELECT @DBName = DatabaseName
+    FROM #Databases
+    WHERE ID = @ID;
+
+    SET @SQL =
+        N'USE ' + QUOTENAME(@DBName) +
+        N'; EXEC sys.sp_updatestats;';
+
+    BEGIN TRY
+        EXEC sys.sp_executesql @SQL;
+        PRINT 'Statistics updated: ' + @DBName;
+    END TRY
+    BEGIN CATCH
+        PRINT 'Statistics failed: ' + @DBName +
+              ' - ' + ERROR_MESSAGE();
+    END CATCH;
+
+    SET @ID += 1;
+END;
+
+DROP TABLE #Databases;
+GO

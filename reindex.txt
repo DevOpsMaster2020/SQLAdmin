@@ -1,0 +1,141 @@
+
+USE master;
+GO
+
+SET NOCOUNT ON;
+
+CREATE TABLE #IndexMaintenance
+(
+    ID INT IDENTITY(1,1) PRIMARY KEY,
+    DatabaseName SYSNAME,
+    Command NVARCHAR(MAX),
+    Status VARCHAR(20) DEFAULT 'Pending',
+    ErrorMessage NVARCHAR(4000) NULL
+);
+
+DECLARE
+    @DBName SYSNAME,
+    @SQL NVARCHAR(MAX),
+    @Command NVARCHAR(MAX),
+    @ID INT,
+    @MaxID INT;
+
+-- Collect eligible user databases
+CREATE TABLE #Databases
+(
+    ID INT IDENTITY(1,1) PRIMARY KEY,
+    DatabaseName SYSNAME
+);
+
+INSERT INTO #Databases (DatabaseName)
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state_desc = 'ONLINE'
+  AND is_read_only = 0
+  AND source_database_id IS NULL;
+
+DECLARE @DBID INT = 1;
+DECLARE @MaxDBID INT =
+    (SELECT MAX(ID) FROM #Databases);
+
+-- Collect index maintenance commands
+WHILE @DBID <= ISNULL(@MaxDBID, 0)
+BEGIN
+    SELECT @DBName = DatabaseName
+    FROM #Databases
+    WHERE ID = @DBID;
+
+    SET @SQL = N'
+    USE ' + QUOTENAME(@DBName) + N';
+
+    INSERT INTO #IndexMaintenance
+        (DatabaseName, Command)
+    SELECT
+        DB_NAME(),
+        N''ALTER INDEX '' + QUOTENAME(i.name) +
+        N'' ON '' + QUOTENAME(s.name) +
+        N''.'' + QUOTENAME(t.name) +
+        CASE
+            WHEN ips.avg_fragmentation_in_percent >= 30
+                THEN N'' REBUILD''
+            ELSE N'' REORGANIZE''
+        END
+    FROM sys.dm_db_index_physical_stats(
+        DB_ID(), NULL, NULL, NULL, ''LIMITED''
+    ) ips
+    JOIN sys.indexes i
+        ON ips.object_id = i.object_id
+       AND ips.index_id = i.index_id
+    JOIN sys.tables t
+        ON i.object_id = t.object_id
+    JOIN sys.schemas s
+        ON t.schema_id = s.schema_id
+    WHERE ips.avg_fragmentation_in_percent >= 10
+      AND ips.page_count >= 1000
+      AND ips.index_level = 0
+      AND ips.alloc_unit_type_desc = ''IN_ROW_DATA''
+      AND i.type IN (1,2)
+      AND i.is_disabled = 0
+      AND i.is_hypothetical = 0
+      AND NOT EXISTS
+      (
+          SELECT 1
+          FROM sys.partitions p
+          WHERE p.object_id = i.object_id
+            AND p.index_id = i.index_id
+            AND p.partition_number > 1
+      );';
+
+    BEGIN TRY
+        EXEC sys.sp_executesql @SQL;
+    END TRY
+    BEGIN CATCH
+        PRINT 'Collection failed for ' + @DBName +
+              ': ' + ERROR_MESSAGE();
+    END CATCH;
+
+    SET @DBID += 1;
+END;
+
+-- Execute collected commands
+SELECT @ID = MIN(ID), @MaxID = MAX(ID)
+FROM #IndexMaintenance;
+
+WHILE @ID IS NOT NULL AND @ID <= @MaxID
+BEGIN
+    SELECT
+        @DBName = DatabaseName,
+        @Command = Command
+    FROM #IndexMaintenance
+    WHERE ID = @ID;
+
+    BEGIN TRY
+        SET @SQL =
+            N'USE ' + QUOTENAME(@DBName) +
+            N'; ' + @Command;
+
+        EXEC sys.sp_executesql @SQL;
+
+        UPDATE #IndexMaintenance
+        SET Status = 'Success'
+        WHERE ID = @ID;
+    END TRY
+    BEGIN CATCH
+        UPDATE #IndexMaintenance
+        SET Status = 'Failed',
+            ErrorMessage = ERROR_MESSAGE()
+        WHERE ID = @ID;
+    END CATCH;
+
+    SET @ID += 1;
+END;
+
+-- Maintenance results
+SELECT *
+FROM #IndexMaintenance
+ORDER BY DatabaseName, ID;
+
+DROP TABLE #IndexMaintenance;
+DROP TABLE #Databases;
+GO

@@ -1,0 +1,33 @@
+
+WITH LastBackups AS
+(
+    SELECT
+        database_name,
+        MAX(CASE WHEN type = 'D'
+                 THEN backup_finish_date END) AS LastFullBackup,
+        MAX(CASE WHEN type = 'L'
+                 THEN backup_finish_date END) AS LastLogBackup
+    FROM msdb.dbo.backupset
+    GROUP BY database_name
+)
+SELECT
+    d.name AS DatabaseName,
+    d.recovery_model_desc AS RecoveryModel,
+    b.LastFullBackup,
+    b.LastLogBackup,
+    CASE
+        WHEN b.LastFullBackup IS NULL
+          OR b.LastFullBackup < DATEADD(HOUR, -24, GETDATE())
+            THEN 'FULL BACKUP OVERDUE'
+        WHEN d.recovery_model_desc IN ('FULL', 'BULK_LOGGED')
+         AND (b.LastLogBackup IS NULL
+           OR b.LastLogBackup < DATEADD(MINUTE, -60, GETDATE()))
+            THEN 'LOG BACKUP OVERDUE'
+        ELSE 'OK'
+    END AS BackupStatus
+FROM sys.databases d
+LEFT JOIN LastBackups b
+    ON d.name = b.database_name
+WHERE d.database_id > 4
+  AND d.state_desc = 'ONLINE'
+ORDER BY d.name;
